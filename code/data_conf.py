@@ -20,7 +20,7 @@ class SAPIENVisionDataset(data.Dataset):
 
     def __init__(self, primact_types, category_types, data_features, buffer_max_num, \
             abs_thres=0.01, rel_thres=0.5, dp_thres=0.5, img_size=224, \
-            no_true_false_equal=False, no_neg_dir_data=False, only_true_data=False, world_coordinate=False):
+            only_true_data=False, world_coordinate=False):
         self.primact_types = primact_types
         self.category_types = category_types
 
@@ -29,17 +29,12 @@ class SAPIENVisionDataset(data.Dataset):
         self.abs_thres = abs_thres
         self.rel_thres = rel_thres
         self.dp_thres = dp_thres
-        self.no_true_false_equal = no_true_false_equal
-        self.no_neg_dir_data = no_neg_dir_data
         self.only_true_data = only_true_data
         self.world_coordinate = world_coordinate
 
         # data buffer
-        self.true_data = dict()
-        self.false_data = dict()
-        for primact_type in primact_types:
-            self.true_data[primact_type] = []
-            self.false_data[primact_type] = []
+        self.data_buffer = []  # (gripper_direction_world, gripper_action_dis, gt_motion)
+        self.seq = []
 
         # data features
         self.data_features = data_features
@@ -48,7 +43,8 @@ class SAPIENVisionDataset(data.Dataset):
         bar = ProgressBar()
         for i in bar(range(len(data_list))):
             cur_dir = data_list[i]
-            cur_shape_id, cur_category, cur_cnt_id, cur_primact_type, cur_trial_id  = cur_dir.split('/')[-1].split('_')
+            cur_shape_id, cur_category, cur_cnt_id, cur_primact_type, cur_trial_id = cur_dir.split('/')[-1].split('_')
+            # print(cur_category)
 
             if cur_primact_type not in self.primact_types:
                 continue
@@ -74,33 +70,26 @@ class SAPIENVisionDataset(data.Dataset):
 
                 ori_pixel_ids = np.array(result_data['pixel_locs'], dtype=np.int32)
                 pixel_ids = np.round(np.array(result_data['pixel_locs'], dtype=np.float32) / 448 * self.img_size).astype(np.int32)
-                
+                ctpt = result_data['position_world']
+
                 success = self.check_success(result_data, cur_primact_type)
+
+                start_pos = result_data['start_target_part_qpos']
+                if result_data['result'] != 'VALID':
+                    end_pos = start_pos
+                else:
+                    end_pos = result_data['final_target_part_qpos']
 
                 # load original data
                 if success:
-                    cur_data = (cur_dir, cur_shape_id, state, cur_category, cur_cnt_id, cur_trial_id, camera_direction, camera_mat44,
-                            ori_pixel_ids, pixel_ids, gripper_direction, gripper_forward_direction, True, True)
-                    self.true_data[cur_primact_type].append(cur_data)
+                    cur_data = (cur_dir, cur_shape_id, state, cur_category, cur_cnt_id, cur_trial_id, ctpt, camera_direction, camera_mat44,
+                            ori_pixel_ids, pixel_ids, gripper_direction, gripper_forward_direction, start_pos, end_pos, True, True)
                 else:
                     if not self.only_true_data:
-                        cur_data = (cur_dir, cur_shape_id, state, cur_category, cur_cnt_id, cur_trial_id, camera_direction, camera_mat44,
-                                ori_pixel_ids, pixel_ids, gripper_direction, gripper_forward_direction, True, False)
-                        self.false_data[cur_primact_type].append(cur_data)
-                
-                # load neg-direction false data
-                if not self.no_neg_dir_data:
-                    cur_data = (cur_dir, cur_shape_id, state, cur_category, cur_cnt_id, cur_trial_id, camera_direction, camera_mat44,
-                            ori_pixel_ids, pixel_ids, -gripper_direction, gripper_forward_direction, False, False)
-                    self.false_data[cur_primact_type].append(cur_data)
+                        cur_data = (cur_dir, cur_shape_id, state, cur_category, cur_cnt_id, cur_trial_id, ctpt, camera_direction, camera_mat44,
+                                ori_pixel_ids, pixel_ids, gripper_direction, gripper_forward_direction, start_pos, end_pos, True, False)
 
-        # delete data if buffer full
-        if self.buffer_max_num is not None:
-            for primact_type in self.primact_types:
-                if len(self.true_data[primact_type]) > self.buffer_max_num:
-                    self.true_data[primact_type] = self.true_data[primact_type][-self.buffer_max_num:]
-                if len(self.false_data[primact_type]) > self.buffer_max_num:
-                    self.false_data[primact_type] = self.false_data[primact_type][-self.buffer_max_num:]
+                self.data_buffer.append(cur_data)
 
     def check_success(self, result_data, primact_type):
         if result_data['result'] != 'VALID':
@@ -115,7 +104,7 @@ class SAPIENVisionDataset(data.Dataset):
 
         if primact_type == 'pushing':
             pass
-         
+
         elif primact_type == 'pulling':
             mov_dir = np.array(result_data['touch_position_world_xyz_end'], dtype=np.float32) - \
                     np.array(result_data['touch_position_world_xyz_start'], dtype=np.float32)
@@ -143,50 +132,27 @@ class SAPIENVisionDataset(data.Dataset):
             raise ValueError('ERROR: primact_type %s not supported in check_success!' % primact_type)
         
         return success
+
+    def get_seq(self):
+        length = len(self.data_buffer) // 32
+        self.seq = np.arange(length)
+        np.random.shuffle(self.seq)
         
     def __str__(self):
         strout = '[SAPIENVisionDataset %d] primact_types: %s, abs_thres: %f, rel_thres: %f, dp_thres: %f, img_size: %d\n' % \
                 (len(self), ','.join(self.primact_types), self.abs_thres, self.rel_thres, self.dp_thres, self.img_size)
         for primact_type in self.primact_types:
-            strout += '\t<%s> True: %d False: %d\n' % (primact_type, len(self.true_data[primact_type]), len(self.false_data[primact_type]))
+            strout += '\t<%s> len %d\n' % (primact_type, len(self.data_buffer))
         return strout
 
     def __len__(self):
-        if self.no_true_false_equal:
-            max_data = 0
-            for primact_type in self.primact_types:
-                max_data = max(max_data, len(self.true_data[primact_type]) + len(self.false_data[primact_type]))
-            return max_data * len(self.primact_types)
-        else:
-            max_data = 0
-            for primact_type in self.primact_types:
-                max_data = max(max_data, len(self.true_data[primact_type]))
-                max_data = max(max_data, len(self.false_data[primact_type]))
-            return max_data * 2 * len(self.primact_types)
+        return len(self.data_buffer)
 
     def __getitem__(self, index):
-        primact_id = index % len(self.primact_types)
-        primact_type = self.primact_types[primact_id]
-        index = index // len(self.primact_types)
-
-        if self.no_true_false_equal:
-            if index < len(self.false_data[primact_type]):
-                cur_dir, shape_id, state, category, cnt_id, trial_id, camera_direction, camera_mat44, ori_pixel_ids, pixel_ids, \
-                        gripper_direction, gripper_forward_direction, is_original, result = \
-                            self.false_data[primact_type][index]
-            else:
-                cur_dir, shape_id, state, category, cnt_id, trial_id, camera_direction, camera_mat44, ori_pixel_ids, pixel_ids, \
-                        gripper_direction, gripper_forward_direction, is_original, result = \
-                            self.true_data[primact_type][(index - len(self.false_data[primact_type])) % len(self.true_data[primact_type])]
-        else:
-            if index % 2 == 0:
-                cur_dir, shape_id, state, category, cnt_id, trial_id, camera_direction, camera_mat44, ori_pixel_ids, pixel_ids, \
-                        gripper_direction, gripper_forward_direction, is_original, result = \
-                            self.true_data[primact_type][(index//2) % len(self.true_data[primact_type])]
-            else:
-                cur_dir, shape_id, state, category, cnt_id, trial_id, camera_direction, camera_mat44, ori_pixel_ids, pixel_ids, \
-                        gripper_direction, gripper_forward_direction, is_original, result = \
-                            self.false_data[primact_type][(index//2) % len(self.false_data[primact_type])]
+        ind = index // 32
+        index = self.seq[ind] * 32 + (index % 32)
+        cur_dir, shape_id, state, category, cnt_id, trial_id, ctpt, camera_direction, camera_mat44, ori_pixel_ids, pixel_ids, \
+            gripper_direction, gripper_forward_direction, start_pos, end_pos, is_original, result = self.data_buffer[index]
 
         # grids
         grid_x, grid_y = np.meshgrid(np.arange(448), np.arange(448))
@@ -290,9 +256,6 @@ class SAPIENVisionDataset(data.Dataset):
 
             elif feat == 'shape_id':
                 data_feats = data_feats + (shape_id,)
-
-            elif feat == 'primact_type':
-                data_feats = data_feats + (primact_type,)
             
             elif feat == 'category':
                 data_feats = data_feats + (category,)
@@ -308,6 +271,18 @@ class SAPIENVisionDataset(data.Dataset):
 
             elif feat == 'camera_direction':
                 data_feats = data_feats + (camera_direction,)
+
+            elif feat == 'start_pos':
+                data_feats = data_feats + (start_pos,)
+
+            elif feat == 'end_pos':
+                data_feats = data_feats + (end_pos,)
+
+            elif feat == 'joint_info':
+                data_feats = data_feats + (np.array([0, 0, 0, 0]),)
+
+            elif feat == 'ctpt':
+                data_feats = data_feats + (ctpt,)
 
             else:
                 raise ValueError('ERROR: unknown feat type %s!' % feat)
