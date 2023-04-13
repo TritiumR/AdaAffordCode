@@ -49,11 +49,6 @@ model_def = utils.get_model_module(eval_conf.model_version)
 network = model_def.Network(train_conf.feat_dim)
 network.to(device)
 network.eval()
-if eval_conf.AIP:
-    AIP_def = utils.get_model_module('model_AIP')
-    AIP = AIP_def.AIP(train_conf.feat_dim)
-    AIP.to(device)
-    AIP.eval()
 
 # setup env
 env = Env()

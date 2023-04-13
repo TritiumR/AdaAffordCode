@@ -211,7 +211,9 @@ class Critic(nn.Module):
 
     def inference_critic_score(self, dir, input_pcs, ctpt, joint_info, f_dir, hidden_info, st_pose):
         batch_size = input_pcs.shape[0]
+        print('batch_size: ', batch_size)
         pt_size = input_pcs.shape[1]
+        print('pt_size: ', pt_size)
         hidden_info = hidden_info.view(batch_size, -1)
         hidden_info = hidden_info.unsqueeze(1).repeat(1, pt_size, 1).view(batch_size * pt_size, -1)
         dir = dir.view(batch_size, -1)
@@ -224,6 +226,8 @@ class Critic(nn.Module):
         input_pcs = input_pcs.repeat(1, 1, 2)
         whole_feats = self.pointnet2(input_pcs)
         net = whole_feats.permute(0, 2, 1).reshape(batch_size * pt_size, -1)
+        joint_info = joint_info.repeat(1, pt_size, 1).view(batch_size * pt_size, -1)
+        print(dir.shape, ctpt.shape, joint_info.shape, f_dir.shape, hidden_info.shape, st_pose.shape)
         x = torch.cat([dir, ctpt, joint_info, f_dir, hidden_info, st_pose], dim=-1)
         x = self.mlp3(x)
         x = torch.cat([net, x], dim=-1)
@@ -349,6 +353,15 @@ class network(nn.Module):
         mean_hidden_info = self.hidden_encoder(dir, dis, push_dis, ctpt, joint_info, input_pcs, start_pos, end_pos, f_dir)
         hidden_info = mean_hidden_info.repeat(batch_size, 1)
         return self.critic(dir, input_pcs, ctpt, joint_info, f_dir, hidden_info, start_pos)
+
+    def inference_one_pc(self, dir, dis, push_dis, ctpt, joint_info, input_pcs, start_pos, end_pos, f_dir, idx):
+        batch_size = input_pcs.shape[0]
+        mean_hidden_info = self.hidden_encoder(dir, dis, push_dis, ctpt, joint_info, input_pcs, start_pos, end_pos, f_dir)
+        hidden_info = mean_hidden_info.repeat(batch_size, 1)
+        return self.critic.inference_critic_score(dir[idx: idx+1], input_pcs[idx: idx+1], ctpt[idx: idx+1],
+                                                  joint_info[idx: idx+1], f_dir[idx: idx+1], hidden_info[idx: idx+1],
+                                                  start_pos[idx: idx+1])
+
     def inference_part(self, dir, dis, push_dis, ctpt, joint_info, input_pcs, start_pos, end_pos, f_dir, idx1, idx2):
         batch_size = idx2.shape[0]
         mean_hidden_info = self.hidden_encoder(dir[idx1], dis[idx1], push_dis[idx1], ctpt[idx1], joint_info[idx1], input_pcs[idx1], start_pos[idx1], end_pos[idx1], f_dir[idx1])

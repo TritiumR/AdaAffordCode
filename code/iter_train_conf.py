@@ -16,39 +16,10 @@ from camera import Camera
 from robots.panda_robot import Robot
 import random
 import utils
-from data import SAPIENVisionDataset
+from data_conf import SAPIENVisionDataset
 from models import model_AIP, model_AAP, model_3d_w2a
 import multiprocessing as mp
 import time
-
-parser = ArgumentParser()
-
-parser.add_argument('--exp_name', type=str, help='name of the training run')
-parser.add_argument('--device', type=str, default='cuda:0', help='cpu or cuda:x for using cuda on GPU number x')
-parser.add_argument('--num_point_per_shape', type=int, default=10000)
-parser.add_argument('--batch_size', type=int, default=32)
-parser.add_argument('--hidden_dim', type=int, default=128)
-parser.add_argument('--feat_dim', type=int, default=128)
-parser.add_argument('--primact_type', type=str, default='pulling', help='the primact type')
-parser.add_argument('--no_gui', action='store_true', default=False, help='no_gui [default: False]')
-parser.add_argument('--AAP_dir', type=str, default='nothing')
-parser.add_argument('--AAP_epoch', type=str, default='nothing')
-parser.add_argument('--AIP_dir', type=str, default='nothing')
-parser.add_argument('--AIP_epoch', type=str, default='nothing')
-parser.add_argument('--out_dir', type=str, default='../logs')
-parser.add_argument('--lr', type=float, default=0.0001)
-parser.add_argument('--weight_decay', type=float, default=1e-5)
-parser.add_argument('--lr_decay_by', type=float, default=0.9)
-parser.add_argument('--lr_decay_every', type=float, default=5000)
-parser.add_argument('--step', type=int, default=4)
-parser.add_argument('--sample_type', type=str, default='fps')
-parser.add_argument('--data_dir', type=str)
-args = parser.parse_args()
-
-data_features = ['gripper_direction_world', 'gripper_action_dis', 'gt_motion', 'pcs', 'ctpt', 'joint_info',
-                 'gripper_forward_direction_world', 'gt_labels', 'start_pos', 'end_pos', "shape_id", "mat44", "ctpt_2d",
-                 "cur_qpos", "trial_id", "mu1", "mu2", "mu3", "mu4", "density", "friction", "rand_pos_seed"]
-
 
 def get_hidden_info(input_pcs_list, dir_list, f_dir_list, push_dis_list, dis_list, ctpt_list, joint_info_list,
                     start_pos_list, end_pos_list, Encoder, conf, grad=False):
@@ -88,12 +59,12 @@ def get_hidden_info(input_pcs_list, dir_list, f_dir_list, push_dis_list, dis_lis
 
 
 def critic_forward(batch, data_features, network, conf, hidden_info):
-    dir = batch[data_features.index('gripper_direction_world')]
+    dir = batch[data_features.index('gripper_direction')]
     input_pcs = batch[data_features.index('pcs')]
     ctpt = batch[data_features.index('ctpt')]
     joint_info = batch[data_features.index('joint_info')]
-    f_dir = batch[data_features.index('gripper_forward_direction_world')]
-    gt_labels = batch[data_features.index('gt_labels')]
+    f_dir = batch[data_features.index('gripper_forward_direction')]
+    gt_labels = batch[data_features.index('result')]
 
     dir = torch.FloatTensor(np.array(dir)).to(conf.device)
     batch_size = dir.shape[0]
@@ -211,24 +182,6 @@ def AIP_forward(batch, data_features, network, AAP, conf, input_pcs_list, dir_li
     return loss
 
 
-# load dataset
-
-################################# load data ###################################
-train_dataset = SAPIENVisionDataset([args.primact_type], data_features)
-conf = args
-conf.ignore_joint_info = True
-conf.continuous = False
-
-train_dataset.load_data(conf.data_dir, batch_size=conf.batch_size, ignore_joint_info=conf.ignore_joint_info)
-
-train_dataset.get_seq()
-
-train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, shuffle=False,
-                                               pin_memory=True, \
-                                               num_workers=0, drop_last=True, collate_fn=utils.collate_feats,
-                                               worker_init_fn=utils.worker_init_fn)
-
-
 def generate_pc(cam_XYZA_id1, cam_XYZA_id2, cam_XYZA_pts, movable_link_mask, mat44, device=None):
     num_point_per_shape = 10000
     out = Camera.compute_XYZA_matrix(cam_XYZA_id1, cam_XYZA_id2, cam_XYZA_pts, 448, 448)
@@ -311,7 +264,7 @@ def get_aff_pic(init_pc_world, init_pc_cam, pc_cam, init_mask, tot_step, hidden_
     up = torch.from_numpy(up).to(args.device)
     forward = torch.from_numpy(forward).to(args.device)
     start_pos = torch.FloatTensor(np.array([start_pos])).to(args.device)
-    state_joint_origins = torch.from_numpy(np.ones(40000)).float().view(-1, 4).to(args.device)
+    state_joint_origins = torch.from_numpy(np.zeros(40000)).float().view(-1, 4).to(args.device)
     with torch.no_grad():
         result = AAP.critic.inference_critic_score_diff_action(up, init_pc_world, None, state_joint_origins, forward,
                                                                hidden_info, start_pos)
@@ -324,34 +277,62 @@ def get_aff_pic(init_pc_world, init_pc_cam, pc_cam, init_mask, tot_step, hidden_
     utils.render_pts_label_png(fn, pc_cam, result)
 
 
-out_dir = os.path.join(args.out_dir, args.exp_name)
-if not os.path.exists(out_dir):
-    os.mkdir(out_dir)
-if not os.path.exists(os.path.join(out_dir, 'ckpts')):
-    os.mkdir(os.path.join(out_dir, 'ckpts'))
-
-
 def run_an_collect(idx_process, args, transition_Q, epoch_Q):
     np.random.seed(random.randint(1, 1000) + idx_process)
     random.seed(random.randint(1, 1000) + idx_process + 7)
 
     device = args.device
 
-    # out_dir = os.path.join(args.out_dir, args.exp_name)
-    # if not os.path.exists(out_dir):
-    #     os.mkdir(out_dir)
-
+    out_dir = os.path.join(args.out_dir, args.exp_name)
     # setup env
     flog = open(os.path.join(out_dir, 'log_%d.txt' % idx_process), 'a')
+    print('111')
     env = Env(flog=flog, show_gui=(not args.no_gui))
-    cam = Camera(env, theta=3.159759861190408, phi=0.7826405702413783)
+    print('222')
+    # cam = Camera(env, theta=3.159759861190408, phi=0.7826405702413783)
+    cam = Camera(env, fixed_position=True)
     if not args.no_gui:
         env.set_controller_camera_pose(cam.pos[0], cam.pos[1], cam.pos[2], np.pi + cam.theta, -cam.phi)
 
-    AIP_old = model_AIP.AIP(feat_dim=args.feat_dim, hidden_dim=args.hidden_dim).to(device).eval()
-
     if not torch.cuda.is_available():
         device = "cpu"
+
+    data_features = ['gripper_direction', 'pcs', 'ctpt', 'joint_info',
+                     'gripper_forward_direction', 'result', 'start_pos', 'end_pos', "shape_id", "ctpt_2d",
+                     "trial_id", "joint_angles"]
+
+    # load dataset
+    train_dataset = SAPIENVisionDataset([args.primact_type], args.category_types, data_features, 400000,
+                                        world_coordinate=True)
+
+    # finding data
+    with open(os.path.join(args.train_data_dir, 'data_tuple_list.txt'), 'r') as fin:
+        all_train_data_list = [os.path.join(args.train_data_dir, l.rstrip()) for l in fin.readlines()]
+
+    train_shape_ids = []
+    for item in all_train_data_list:
+        if item.split('_')[-5] not in train_shape_ids:
+            train_shape_ids.append(item.split('_')[-5])
+
+    train_data_list = []
+    for id in train_shape_ids:
+        for item in all_train_data_list:
+            # print(category, item.split('_')[-4])
+            if int(item.split('_')[-1]) < args.num_interaction_data_offline and item.split('_')[-5] == id:
+                train_data_list.append(item)
+
+    train_dataset.load_data(train_data_list)
+    train_dataset.get_seq()
+    print(str(train_dataset))
+
+    train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, shuffle=False,
+                                                   pin_memory=True, \
+                                                   num_workers=0, drop_last=True, collate_fn=utils.collate_feats,
+                                                   worker_init_fn=utils.worker_init_fn)
+
+    AIP_old = model_AIP.AIP(feat_dim=args.feat_dim, hidden_dim=args.hidden_dim).to(device).eval()
+    print('333')
+
     if args.primact_type == "pulling":
         train_conf = torch.load(
             os.path.join(
@@ -402,9 +383,7 @@ def run_an_collect(idx_process, args, transition_Q, epoch_Q):
     tot_FN = 0
     tot_FP = 0
     tot_succ = 0
-    robot_material_dict = {}
-    object_material_dict = {}
-    for epoch in range(20):
+    for epoch in range(1000):
         train_batches = enumerate(train_dataloader, 0)
         for train_batch_ind, batch in train_batches:
             if (random.random() < 0.5):
@@ -429,56 +408,51 @@ def run_an_collect(idx_process, args, transition_Q, epoch_Q):
             joint_info_list = []
             start_pos_list = []
             end_pos_list = []
-            # ['gripper_direction_world', 'gripper_action_dis', 'gt_motion', 'pcs', 'ctpt', 'joint_info',
-            #  'gripper_forward_direction_world', 'gt_labels', 'start_pos', 'end_pos', "shape_id", "mat44", "ctpt_2d",
-            #  "cur_qpos", "trial_id", "mu1", "mu2", "mu3", "mu4", "density", "friction"]
-            # dir, dis, push_dis, ctpt, joint_info, pcs, start_pos, end_pos, f_dir
             ##########################################################################################
-            # y_more_zero = 0
-            # y_less_zero = 0
-            # for idx in range(32):
-            #     interaction_ctpt = batch[data_features.index('ctpt')][idx]
-            #     interaction_ctpt_y = interaction_ctpt[1]
-            #     interaction_gt_label = batch[data_features.index('gt_labels')][idx]
-            #     if interaction_gt_label == 1:
-            #         if interaction_ctpt_y > 0:
-            #             y_more_zero = 1
-            #         if interaction_ctpt_y < 0:
-            #             y_less_zero = 1
-            # idxx = random.sample(range(16, 32), 3)
             idxx = [random.randint(0, 30)]
             idx = idxx[0]
-            trial_id = batch[data_features.index('trial_id')][idx]
             shape_id = batch[data_features.index('shape_id')][idx]
+            print(shape_id)
             ctpt_2d = batch[data_features.index('ctpt_2d')][idx]
-            cur_qpos = batch[data_features.index('cur_qpos')][idx]
-            st_pos = batch[data_features.index('start_pos')][idx]
-            mu1 = batch[data_features.index('mu1')][idx]
-            mu2 = batch[data_features.index('mu2')][idx]
-            mu3 = batch[data_features.index('mu3')][idx]
-            mu4 = batch[data_features.index('mu4')][idx]
-            density = batch[data_features.index('density')][idx]
-            friction = batch[data_features.index('friction')][idx]
-            rand_pos_seed = batch[data_features.index('rand_pos_seed')][idx]
-            # out_dir = os.path.join(old_out_dir, f"{train_batch_ind}_{shape_id}")
-            # if not os.path.exists(out_dir):
-            #     os.mkdir(out_dir)
+            joint_angles = batch[data_features.index('joint_angles')][idx]
 
             torch.cuda.empty_cache()
 
-            if not mu3 in robot_material_dict:
-                robot_material_dict[mu3] = env.get_material(mu3, mu4, 0.01)
-            if not mu1 in object_material_dict:
-                object_material_dict[mu1] = env.get_material(mu1, mu2, 0.01)
-
-            robot_material = robot_material_dict[mu3]
-            object_material = object_material_dict[mu1]
+            robot_material = env.get_material(4, 4, 0.01)
+            object_material = env.get_material(4, 4, 0.01)
             state = 'random-middle'
             object_urdf_fn = '../data/where2act_original_sapien_dataset/%s/mobility_vhacd.urdf' % shape_id
-            env.load_object(object_urdf_fn, object_material, state=state, density=density)
+            env.load_object(object_urdf_fn, object_material, state=state)
 
-            cur_qpos = np.array(cur_qpos)
-            env.object.set_qpos(cur_qpos.astype(np.float32))
+            env.set_object_joint_angles(joint_angles)
+            cur_qpos = env.get_object_qpos()
+
+            # simulate some steps for the object to stay rest
+            still_timesteps = 0
+            wait_timesteps = 0
+            while still_timesteps < 5000 and wait_timesteps < 50000:
+                env.step()
+                env.render()
+                cur_new_qpos = env.get_object_qpos()
+                invalid_contact = False
+                for c in env.scene.get_contacts():
+                    for p in c.points:
+                        if abs(p.impulse @ p.impulse) > 1e-4:
+                            invalid_contact = True
+                            break
+                    if invalid_contact:
+                        break
+                if np.max(np.abs(cur_new_qpos - cur_qpos)) < 1e-6 and (not invalid_contact):
+                    still_timesteps += 1
+                else:
+                    still_timesteps = 0
+                cur_qpos = cur_new_qpos
+                wait_timesteps += 1
+            if still_timesteps < 150:
+                env.scene.remove_articulation(env.object)
+                print("not still")
+                continue
+
             ############## get target part ###############
             env.step()
             env.render()
@@ -500,25 +474,19 @@ def run_an_collect(idx_process, args, transition_Q, epoch_Q):
             world_pc, pc, movables = generate_pc(cam_XYZA_id1, cam_XYZA_id2, cam_XYZA_pts, gt_movable_link_mask, mat44,
                                                  device=args.device)
             #############################################################################
-            # ['gripper_direction_world', 'gripper_action_dis', 'gt_motion', 'pcs', 'ctpt', 'joint_info',
-            #  'gripper_forward_direction_world', 'gt_labels', 'start_pos', 'end_pos', "shape_id", "mat44", "ctpt_2d",
-            #  "cur_qpos", "trial_id", "mu1", "mu2", "mu3", "mu4", "density", "friction"]
             input_pcs_list.append(world_pc)
-            dir_list.append(batch[data_features.index('gripper_direction_world')][idx])
-            f_dir_list.append(batch[data_features.index('gripper_forward_direction_world')][idx])
+            dir_list.append(batch[data_features.index('gripper_direction')][idx])
+            f_dir_list.append(batch[data_features.index('gripper_forward_direction')][idx])
             ctpt_list.append(batch[data_features.index('ctpt')][idx])
-            push_dis_list.append(batch[data_features.index('gt_motion')][idx])
-            dis_list.append(batch[data_features.index('gripper_action_dis')][idx])
-            joint_info_list.append(np.array([1, 1, 1, 1]))
+            final_dist = 0.1
+            if args.primact_type == 'pushing-left' or args.primact_type == 'pushing-up':
+                final_dist = 0.11
+            dis_list.append(final_dist)
+            joint_info_list.append(np.array([0, 0, 0, 0]))
             start_pos_list.append(batch[data_features.index('start_pos')][idx])
             end_pos_list.append(batch[data_features.index('end_pos')][idx])
+            push_dis_list.append(abs(batch[data_features.index('start_pos')][idx] - batch[data_features.index('end_pos')][idx]))
 
-            ######################################################
-
-            ############## set friction ########################
-            for j in env.object.get_joints():
-                if j.get_child_link().get_id() == env.target_object_part_actor_id:
-                    j.set_friction(friction)
             ####################################################
             tot_step = 0
             other_step = 0
@@ -566,7 +534,7 @@ def run_an_collect(idx_process, args, transition_Q, epoch_Q):
 
                     st_pos = torch.FloatTensor(np.array([start_pos])).to(args.device)
                 with torch.no_grad():
-                    state_joint_origins = torch.from_numpy(np.ones(n * 40000)).float().view(-1, 4).to(args.device)
+                    state_joint_origins = torch.from_numpy(np.zeros(n * 40000)).float().view(-1, 4).to(args.device)
                     critic_result = AAP_old.critic.inference_critic_score_diff_naction(up, init_pc_world, None,
                                                                                        state_joint_origins,
                                                                                        forward, hidden_info, st_pos,
@@ -574,10 +542,34 @@ def run_an_collect(idx_process, args, transition_Q, epoch_Q):
                     result = AIP_old.inference_nscore(init_pc_world, hidden_info, up, forward, critic_result, n=n)
 
                     result = result.view(10000, n, 1).topk(k=3, dim=1)[0].mean(dim=1).view(-1)
+                    # visualize_result = torch.sigmoid(result)
+                    visualize_result = result
+                    critic_result = critic_result.view(10000, n, 1).topk(k=3, dim=1)[0].mean(dim=1).view(-1)
                     result = result.detach().cpu().numpy()
+                    visualize_result = visualize_result.detach().cpu().numpy()
+                    critic_result = critic_result.detach().cpu().numpy()
+                    print(f'result_min {result.min()}, result_max {result.max()}')
+
                 result = result.reshape(10000)
+                visualize_result = visualize_result.reshape(10000)
+                visualize_critic = critic_result.reshape(10000)
                 # ipdb.set_trace()
+                visualize_critic *= init_mask
                 result *= init_mask
+                visualize_result -= visualize_result.min()
+                visualize_result *= init_mask
+                visualize_result = visualize_result * 1.0 / visualize_result.max()
+
+                if shape_id[0] in args.visual_shape or train_batch_ind % 3 == 0:
+                    cam_pc = (np.linalg.inv(mat44[:3, :3]) @ init_pc_world[0].cpu().numpy().T).T
+                    result_dir = os.path.join('../logs', args.exp_name, f'visu_critic-{shape_id}')
+                    if not os.path.exists(result_dir):
+                        os.mkdir(result_dir)
+                    fn = os.path.join(result_dir, f'AIP-{now_epoch_qsize}-{epoch}')
+                    utils.render_pts_label_png(fn, cam_pc, visualize_result)
+                    fn = os.path.join(result_dir, f'AAP-{now_epoch_qsize}-{epoch}')
+                    utils.render_pts_label_png(fn, cam_pc, visualize_critic)
+                    print(f'save to {result_dir}')
 
                 accu = 2
                 # print(result)
@@ -630,7 +622,7 @@ def run_an_collect(idx_process, args, transition_Q, epoch_Q):
                     forward = cam.get_metadata()['mat44'][:3, :3] @ forward
                     up = torch.FloatTensor(up).view(1, -1).to(args.device)
                     forward = torch.FloatTensor(forward).view(1, -1).to(args.device)
-                    joint_info = torch.FloatTensor(np.array([1, 1, 1, 1])).view(1, -1).to(args.device)
+                    joint_info = torch.FloatTensor(np.array([0, 0, 0, 0])).view(1, -1).to(args.device)
                     position_world_tensor = torch.FloatTensor(position_world).view(1, -1).to(args.device)
                     st_pose = torch.FloatTensor(np.array([start_pos])).view(1, -1).to(args.device)
                     with torch.no_grad():
@@ -680,14 +672,14 @@ def run_an_collect(idx_process, args, transition_Q, epoch_Q):
                 rotmat[:3, 1] = left
                 rotmat[:3, 2] = up
 
-                final_dist = 0.05
+                final_dist = 0.1
+                if args.primact_type == 'pushing-left' or args.primact_type == 'pushing-up':
+                    final_dist = 0.11
 
                 final_rotmat = np.array(rotmat, dtype=np.float32)
-                final_rotmat[:3,
-                3] = position_world - action_direction_world * final_dist - action_direction_world * 0.1
+                final_rotmat[:3, 3] = position_world - action_direction_world * final_dist - action_direction_world * 0.1
                 if args.primact_type == 'pushing':
-                    final_rotmat[:3,
-                    3] = position_world + action_direction_world * final_dist - action_direction_world * 0.15
+                    final_rotmat[:3, 3] = position_world + action_direction_world * final_dist - action_direction_world * 0.15
                 final_pose = Pose().from_transformation_matrix(final_rotmat)
 
                 start_rotmat = np.array(rotmat, dtype=np.float32)
@@ -761,14 +753,10 @@ def run_an_collect(idx_process, args, transition_Q, epoch_Q):
                 touch_position_world_xyz_end = position_world_xyz1_end[:3]
                 env.scene.remove_articulation(robot.robot)
                 # succ_cnt = succ_cnt + 1
-                flag = 0
                 if success:
                     final_target_part_qpos = float(env.get_object_qpos()[target_part_joint_idx])
                     gt_motion = abs(final_target_part_qpos - start_pos)
 
-                    if (final_target_part_qpos - start_pos > 0 and rand_pos_seed == 0) or (
-                            final_target_part_qpos - start_pos < 0 and rand_pos_seed == 1):
-                        flag = 1
                     mov_dir = touch_position_world_xyz_end - touch_position_world_xyz_start
                     mov_dir /= np.linalg.norm(mov_dir)
                     intended_dir = -up
@@ -791,8 +779,8 @@ def run_an_collect(idx_process, args, transition_Q, epoch_Q):
                 f_dir_list.append(forward)
                 ctpt_list.append(position_world)
                 push_dis_list.append(gt_motion)
-                dis_list.append(np.array([0.05]))
-                joint_info_list.append(np.array([1, 1, 1, 1]))
+                dis_list.append(np.array([final_dist]))
+                joint_info_list.append(np.array([0, 0, 0, 0]))
                 start_pos_list.append(start_pos)
                 end_pos_list.append(final_target_part_qpos)
 
@@ -812,97 +800,156 @@ def run_an_collect(idx_process, args, transition_Q, epoch_Q):
             env.scene.remove_articulation(env.object)
             torch.cuda.empty_cache()
 
+if __name__ == '__main__':
+    torch.multiprocessing.set_start_method('spawn', force=True)
 
-trans_q = mp.Queue()
-epoch_q = mp.Queue()
-# args.device = "cuda:1"
-for idx_process in range(1):
-    p = mp.Process(target=run_an_collect, args=(idx_process, args, trans_q, epoch_q))
-    p.start()
+    parser = ArgumentParser()
 
-AAP = model_AAP.network(input_dim=17, pnpp_feat_dim=128, hidden_feat_dim=128, feat_dim=args.feat_dim,
-                        hidden_dim=args.hidden_dim)
+    parser.add_argument('--exp_name', type=str, help='name of the training run')
+    parser.add_argument('--device', type=str, default='cuda:0', help='cpu or cuda:x for using cuda on GPU number x')
+    parser.add_argument('--num_point_per_shape', type=int, default=10000)
+    parser.add_argument('--num_interaction_data_offline', type=int, default=100)
+    parser.add_argument('--batch_size', type=int, default=32)
+    parser.add_argument('--hidden_dim', type=int, default=128)
+    parser.add_argument('--feat_dim', type=int, default=128)
+    parser.add_argument('--primact_type', type=str, default='pulling', help='the primact type')
+    parser.add_argument('--category_types', type=str, default=None, help='the primact type')
+    parser.add_argument('--no_gui', action='store_true', default=False, help='no_gui [default: False]')
+    parser.add_argument('--AAP_dir', type=str, default='nothing')
+    parser.add_argument('--AAP_epoch', type=str, default='nothing')
+    parser.add_argument('--AIP_dir', type=str, default='nothing')
+    parser.add_argument('--AIP_epoch', type=str, default='nothing')
+    parser.add_argument('--out_dir', type=str, default='../logs')
+    parser.add_argument('--lr', type=float, default=0.0001)
+    parser.add_argument('--weight_decay', type=float, default=1e-5)
+    parser.add_argument('--lr_decay_by', type=float, default=0.9)
+    parser.add_argument('--lr_decay_every', type=float, default=5000)
+    parser.add_argument('--step', type=int, default=4)
+    parser.add_argument('--sample_type', type=str, default='fps')
+    parser.add_argument('--train_data_dir', type=str)
+    parser.add_argument('--visual_shape', type=str, default=None)
+    args = parser.parse_args()
 
-AAP_opt = torch.optim.Adam(filter(lambda p: p.requires_grad, AAP.parameters()), lr=args.lr,
-                           weight_decay=args.weight_decay)
-# learning rate scheduler
-AAP_lr_scheduler = torch.optim.lr_scheduler.StepLR(AAP_opt, step_size=args.lr_decay_every,
-                                                   gamma=args.lr_decay_by)
-utils.optimizer_to_device(AAP_opt, args.device)
+    data_features = ['gripper_direction', 'pcs', 'ctpt', 'joint_info',
+                     'gripper_forward_direction', 'result', 'start_pos', 'end_pos', "shape_id", "ctpt_2d",
+                     "trial_id", "joint_angles"]
 
-data_to_store = torch.load(
-    os.path.join(args.AAP_dir, 'ckpts', args.AAP_epoch))
-AAP.load_state_dict(data_to_store)
-AAP.to(args.device)
+    if args.category_types is None:
+        args.category_types = ['Box', 'Door', 'Faucet', 'Kettle', 'Microwave', 'Refrigerator', 'StorageFurniture',
+                               'Switch', 'TrashCan', 'Window']
+    else:
+        args.category_types = args.category_types.split(',')
+    print('category_types: %s' % str(args.category_types))
 
-AIP = model_AIP.AIP(feat_dim=args.feat_dim, hidden_dim=args.hidden_dim).to(args.device)
-data_to_store = torch.load(
-    os.path.join(args.AIP_dir, 'ckpts', args.AIP_epoch))
-AIP.load_state_dict(data_to_store)
-AIP_opt = torch.optim.Adam(filter(lambda p: p.requires_grad, AIP.parameters()), lr=args.lr,
-                           weight_decay=args.weight_decay)
-# learning rate scheduler
-AIP_lr_scheduler = torch.optim.lr_scheduler.StepLR(AIP_opt, step_size=args.lr_decay_every,
-                                                   gamma=args.lr_decay_by)
-utils.optimizer_to_device(AIP_opt, args.device)
+    if args.visual_shape is None:
+        args.visual_shape = []
+    else:
+        args.visual_shape = args.visual_shape.split(',')
 
-train_AAP = True
-train_AIP = False
-epoch = 1
-loss_cnt = 0
-while True:
-    if not trans_q.empty():
+    # load dataset
 
-        t0 = time.time()
-        print("time:", t0, " update network in epoch:", epoch + 1)
-        epoch += 1
+    ################################# load data ###################################
+    conf = args
+    conf.ignore_joint_info = True
+    conf.continuous = False
 
-        input_pcs_list, dir_list, f_dir_list, push_dis_list, dis_list, ctpt_list, joint_info_list, start_pos_list, end_pos_list, batch = trans_q.get()
-        for i in range(len(input_pcs_list)):
-            input_pcs_list[i] = torch.from_numpy(input_pcs_list[i])
-        for i in range(len(batch[data_features.index('pcs')])):
-            batch[data_features.index('pcs')][i] = torch.from_numpy(batch[data_features.index('pcs')][i])
-        if train_AAP:
-            hidden_info = get_hidden_info(input_pcs_list, dir_list, f_dir_list, push_dis_list, dis_list, ctpt_list,
-                                          joint_info_list, start_pos_list, end_pos_list, AAP.hidden_encoder, args,
-                                          grad=True)
-            loss = critic_forward(batch, data_features, AAP, args, hidden_info)
-            AAP_opt.zero_grad()
-            loss.backward()
-            # optimize one step
-            AAP_opt.step()
-            AAP_opt.zero_grad()
-            AAP_lr_scheduler.step()
-        if train_AIP and len(dir_list) > 1:
-            loss = AIP_forward(batch, data_features, AIP, AAP, args, input_pcs_list, dir_list, f_dir_list,
-                               push_dis_list, dis_list, ctpt_list, joint_info_list, start_pos_list, end_pos_list)
-            AIP_opt.zero_grad()
-            loss.backward()
-            # optimize one step
-            AIP_opt.step()
-            AIP_opt.zero_grad()
-            AIP_lr_scheduler.step()
-        if train_AAP or (train_AIP and len(dir_list) > 1):
-            loss_cnt += loss.item()
+    out_dir = os.path.join(args.out_dir, args.exp_name)
+    if not os.path.exists(out_dir):
+        os.mkdir(out_dir)
+    if not os.path.exists(os.path.join(out_dir, 'ckpts')):
+        os.mkdir(os.path.join(out_dir, 'ckpts'))
 
-        if epoch % 10 == 0:
-            print("epoch: ", epoch, "loss: ", loss_cnt / 10)
-            loss_cnt = 0
+    trans_q = mp.Queue()
+    epoch_q = mp.Queue()
+    # args.device = "cuda:1"
+    for idx_process in range(1):
+        p = mp.Process(target=run_an_collect, args=(idx_process, args, trans_q, epoch_q))
+        p.start()
 
-        if epoch % 400 == 0:
-            step = epoch // 400
-            with torch.no_grad():
-                torch.save(AAP.state_dict(), os.path.join(out_dir, 'ckpts', f'{step}_secondAAP-network.pth'))
-                torch.save(AIP.state_dict(), os.path.join(out_dir, 'ckpts', f'{step}_secondAIP-network.pth'))
-            epoch_q.put(step)
+    AAP = model_AAP.network(input_dim=17, pnpp_feat_dim=128, hidden_feat_dim=128, feat_dim=args.feat_dim,
+                            hidden_dim=args.hidden_dim)
 
-        if epoch % 1200 == 0:
+    AAP_opt = torch.optim.Adam(filter(lambda p: p.requires_grad, AAP.parameters()), lr=args.lr,
+                               weight_decay=args.weight_decay)
+    # learning rate scheduler
+    AAP_lr_scheduler = torch.optim.lr_scheduler.StepLR(AAP_opt, step_size=args.lr_decay_every,
+                                                       gamma=args.lr_decay_by)
+    utils.optimizer_to_device(AAP_opt, args.device)
+
+    data_to_store = torch.load(
+        os.path.join(args.AAP_dir, 'ckpts', args.AAP_epoch))
+    AAP.load_state_dict(data_to_store)
+    AAP.to(args.device)
+
+    AIP = model_AIP.AIP(feat_dim=args.feat_dim, hidden_dim=args.hidden_dim).to(args.device)
+    data_to_store = torch.load(
+        os.path.join(args.AIP_dir, 'ckpts', args.AIP_epoch))
+    AIP.load_state_dict(data_to_store)
+    AIP_opt = torch.optim.Adam(filter(lambda p: p.requires_grad, AIP.parameters()), lr=args.lr,
+                               weight_decay=args.weight_decay)
+    # learning rate scheduler
+    AIP_lr_scheduler = torch.optim.lr_scheduler.StepLR(AIP_opt, step_size=args.lr_decay_every,
+                                                       gamma=args.lr_decay_by)
+    utils.optimizer_to_device(AIP_opt, args.device)
+
+    train_AAP = True
+    train_AIP = False
+    epoch = 0
+    loss_cnt = 0
+    while True:
+        if not trans_q.empty():
+
+            t0 = time.time()
+            print("time:", t0, " update network in epoch:", epoch)
+
+            input_pcs_list, dir_list, f_dir_list, push_dis_list, dis_list, ctpt_list, joint_info_list, start_pos_list, end_pos_list, batch = trans_q.get()
+            for i in range(len(input_pcs_list)):
+                input_pcs_list[i] = torch.from_numpy(input_pcs_list[i])
+            for i in range(len(batch[data_features.index('pcs')])):
+                batch[data_features.index('pcs')][i] = torch.from_numpy(batch[data_features.index('pcs')][i])
             if train_AAP:
-                train_AAP = False
-            else:
-                train_AAP = True
+                hidden_info = get_hidden_info(input_pcs_list, dir_list, f_dir_list, push_dis_list, dis_list, ctpt_list,
+                                              joint_info_list, start_pos_list, end_pos_list, AAP.hidden_encoder, args,
+                                              grad=True)
+                loss = critic_forward(batch, data_features, AAP, args, hidden_info)
+                AAP_opt.zero_grad()
+                loss.backward()
+                # optimize one step
+                AAP_opt.step()
+                AAP_opt.zero_grad()
+                AAP_lr_scheduler.step()
+            if train_AIP and len(dir_list) > 1:
+                loss = AIP_forward(batch, data_features, AIP, AAP, args, input_pcs_list, dir_list, f_dir_list,
+                                   push_dis_list, dis_list, ctpt_list, joint_info_list, start_pos_list, end_pos_list)
+                AIP_opt.zero_grad()
+                loss.backward()
+                # optimize one step
+                AIP_opt.step()
+                AIP_opt.zero_grad()
+                AIP_lr_scheduler.step()
+            if train_AAP or (train_AIP and len(dir_list) > 1):
+                loss_cnt += loss.item()
 
-            if train_AIP:
-                train_AIP = False
-            else:
-                train_AIP = True
+            if epoch % 10 == 0:
+                print("epoch: ", epoch, "loss: ", loss_cnt / 10)
+                loss_cnt = 0
+
+            if epoch % 100 == 0:
+                step = epoch // 100
+                with torch.no_grad():
+                    torch.save(AAP.state_dict(), os.path.join(out_dir, 'ckpts', f'{step}_secondAAP-network.pth'))
+                    torch.save(AIP.state_dict(), os.path.join(out_dir, 'ckpts', f'{step}_secondAIP-network.pth'))
+                epoch_q.put(step)
+
+            epoch += 1
+
+            if epoch % 1200 == 0:
+                if train_AAP:
+                    train_AAP = False
+                else:
+                    train_AAP = True
+
+                if train_AIP:
+                    train_AIP = False
+                else:
+                    train_AIP = True

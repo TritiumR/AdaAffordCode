@@ -8,7 +8,7 @@ from argparse import ArgumentParser
 import numpy as np
 import torch
 import torch.utils.data
-from data import SAPIENVisionDataset
+from data_conf import SAPIENVisionDataset
 import utils
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -19,8 +19,8 @@ from pointnet2_ops.pointnet2_utils import furthest_point_sample
 
 def train(conf, train_data_list, val_data_list):
     # create training and validation datasets and data loaders
-    data_features = ['gripper_direction_world', 'gripper_action_dis', 'gt_motion', 'pcs', 'ctpt', 'joint_info',
-                     'gripper_forward_direction_world', 'gt_labels', 'start_pos', 'end_pos']
+    data_features = ['gripper_direction', 'pcs', 'gripper_forward_direction', 'result', 'start_pos', 'end_pos',
+                     'joint_info', 'category', 'shape_id', 'ctpt']
     # load network model
     model_def = utils.get_model_module("model_AAP")
 
@@ -32,9 +32,6 @@ def train(conf, train_data_list, val_data_list):
     model_def = utils.get_model_module("model_AIP")
     network = model_def.AIP(feat_dim=conf.feat_dim, hidden_dim=conf.hidden_dim)
 
-    #     # print(para)
-    #     para.requires_grad = False
-    # optimizer = optim.Adam(filter(lambda p: p.requires_grad, network.parameters()), lr=0.1)
     network_opt = torch.optim.Adam(filter(lambda p: p.requires_grad, network.parameters()), lr=conf.lr,
                                    weight_decay=conf.weight_decay)
     # learning rate scheduler
@@ -55,27 +52,28 @@ def train(conf, train_data_list, val_data_list):
     utils.optimizer_to_device(network_opt, conf.device)
 
     # load dataset
-    train_dataset = SAPIENVisionDataset([conf.primact_type], data_features)
+    train_dataset = SAPIENVisionDataset([conf.primact_type], conf.category_types, data_features, 400000, world_coordinate=True)
 
-    val_dataset = SAPIENVisionDataset([conf.primact_type], data_features)
+    val_dataset = SAPIENVisionDataset([conf.primact_type], conf.category_types, data_features, 400000, world_coordinate=True)
 
-    ### load data for the current epoch
-    train_dataset.load_data(train_data_list, batch_size=conf.batch_size, ignore_joint_info=conf.ignore_joint_info)
-    val_dataset.load_data(val_data_list, batch_size=conf.batch_size, ignore_joint_info=conf.ignore_joint_info)
+    train_dataset.load_data(train_data_list)
+    val_dataset.load_data(val_data_list)
     train_dataset.get_seq()
     val_dataset.get_seq()
-
     utils.printout(conf.flog, str(train_dataset))
+    utils.printout(conf.flog, str(val_dataset))
+
     train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=conf.batch_size, shuffle=False,
-                                                   pin_memory=True, \
+                                                   pin_memory=True,
                                                    num_workers=0, drop_last=True, collate_fn=utils.collate_feats,
                                                    worker_init_fn=utils.worker_init_fn)
-    train_num_batch = len(train_dataloader)
-    utils.printout(conf.flog, str(val_dataset))
+
     val_dataloader = torch.utils.data.DataLoader(val_dataset, batch_size=conf.batch_size, shuffle=False,
-                                                 pin_memory=True, \
+                                                 pin_memory=True,
                                                  num_workers=0, drop_last=True, collate_fn=utils.collate_feats,
                                                  worker_init_fn=utils.worker_init_fn)
+
+    train_num_batch = len(train_dataloader)
     val_num_batch = len(val_dataloader)
     print('train_num_batch: %d, val_num_batch: %d' % (train_num_batch, val_num_batch))
 
@@ -177,61 +175,43 @@ def train(conf, train_data_list, val_data_list):
 def epi_forward(batch, data_features, network, AAP, conf, \
                    is_val=False, step=None, epoch=None, batch_ind=0, num_batch=1, start_time=0, \
                    log_console=False, log_tb=False, tb_writer=None, lr=None):
+    # categories = batch[data_features.index('category')]
+    # shape_id = batch[data_features.index('shape_id')]
+    # print(shape_id)
 
-    dir = batch[data_features.index('gripper_direction_world')]
-    input_pcs = batch[data_features.index('pcs')]
-    ctpt = batch[data_features.index('ctpt')]
-    joint_info = batch[data_features.index('joint_info')]
-    f_dir = batch[data_features.index('gripper_forward_direction_world')]
-    gt_labels = batch[data_features.index('gt_labels')]
-
-    # hidden_info = batch[data_features.index('hidden_info')]
-
-    dir = torch.FloatTensor(np.array(dir)).to(conf.device)
-    batch_size = dir.shape[0]
-    dir = dir.view(batch_size, -1)
-
-    # hidden_info = torch.FloatTensor(np.array(hidden_info)).view(batch_size, -1).to(conf.device)
-    ctpt = torch.FloatTensor(np.array(ctpt)).view(batch_size, -1).to(conf.device)
-    joint_info = torch.FloatTensor(np.array(joint_info)).view(batch_size, -1).to(conf.device)
-    f_dir = torch.FloatTensor(np.array(f_dir)).view(batch_size, -1).to(conf.device)
-    gt_labels = torch.FloatTensor(np.array(gt_labels)).view(batch_size).to(conf.device)
-    input_pcs = torch.cat(input_pcs, dim=0).to(conf.device)  # B x 3N x 3   # point cloud
-    # input_pxids = torch.cat(batch[data_features.index('pc_pxids')], dim=0).to(conf.device)  # B x 3N x 2
+    # print(shape_id)
+    # print(trial_id)
+    # prepare input
+    input_pcs = torch.cat(batch[data_features.index('pcs')], dim=0).to(conf.device)  # B x 3N x 3
     batch_size = input_pcs.shape[0]
 
-    # print(ctpt.shape)
-    # print(f_dir.shape)
-    # print(joint_info.shape)
-    # print(hidden_info.shape)
-    input_pcid1 = torch.arange(batch_size).unsqueeze(1).repeat(1, conf.num_point_per_shape).long().reshape(
-        -1)  # BN
-    if conf.sample_type == 'fps':
-        input_pcid2 = furthest_point_sample(input_pcs, conf.num_point_per_shape).long().reshape(-1)  # BN
-    elif conf.sample_type == 'random':
-        pcs_id = ()
-        for batch_idx in range(input_pcs.shape[0]):
-            idx = np.arange(input_pcs[batch_idx].shape[0])
-            np.random.shuffle(idx)
-            while len(idx) < conf.num_point_per_shape:
-                idx = np.concatenate([idx, idx])
-            idx = idx[:conf.num_point_per_shape]
-            pcs_id = pcs_id + (torch.tensor(np.array(idx)),)
-        input_pcid2 = torch.stack(pcs_id, dim=0).long().reshape(-1)
+    input_pcid1 = torch.arange(batch_size).unsqueeze(1).repeat(1, conf.num_point_per_shape).long().reshape(-1)  # BN
+    input_pcid2 = furthest_point_sample(input_pcs, conf.num_point_per_shape).long().reshape(-1)  # BN
     input_pcs = input_pcs[input_pcid1, input_pcid2, :].reshape(batch_size, conf.num_point_per_shape, -1)
-    ctpt = ctpt.view(batch_size, -1).to(conf.device)
-    input_pcs[:, 0] = ctpt
 
-    # pred_score = network(pcs,query_feats,hidden_info_ctpt)
+    input_dirs1 = torch.cat(batch[data_features.index('gripper_direction')], dim=0).to(conf.device)  # B x 3
+    input_dirs2 = torch.cat(batch[data_features.index('gripper_forward_direction')], dim=0).to(conf.device)  # B x 3
+    joint_info = batch[data_features.index('joint_info')]
+    ctpt = batch[data_features.index('ctpt')]
 
-    dis = batch[data_features.index('gripper_action_dis')]
-    push_dis = batch[data_features.index('gt_motion')]
-    start_pos = batch[data_features.index('start_pos')]
-    end_pos = batch[data_features.index('end_pos')]
-    dis = torch.FloatTensor(np.array(dis)).view(batch_size, -1).to(conf.device)
-    push_dis = torch.FloatTensor(np.array(push_dis)).view(batch_size, -1).to(conf.device)
-    start_pos = torch.FloatTensor(np.array(start_pos)).view(batch_size, -1).to(conf.device)
-    end_pos = torch.FloatTensor(np.array(end_pos)).view(batch_size, -1).to(conf.device)
+    # prepare gt
+    gt_result = torch.Tensor(batch[data_features.index('result')]).float().to(conf.device)  # B
+
+    ctpt = torch.FloatTensor(np.array(ctpt)).view(batch_size, -1).to(conf.device)
+    joint_info = torch.FloatTensor(joint_info).view(batch_size, -1).to(conf.device)
+
+    final_dist = 0.1
+    if conf.primact_type == 'pushing-left' or conf.primact_type == 'pushing-up':
+        final_dist = 0.11
+
+    start_pos = np.array(batch[data_features.index('start_pos')])
+    end_pos = np.array(batch[data_features.index('end_pos')])
+    push_dis = abs(start_pos - end_pos)
+
+    dis = torch.Tensor(np.ones((batch_size, 1)) * final_dist).to(conf.device)
+    push_dis = torch.FloatTensor(push_dis).view(batch_size, -1).to(conf.device)
+    start_pos = torch.FloatTensor(start_pos).view(batch_size, -1).to(conf.device)
+    end_pos = torch.FloatTensor(end_pos).view(batch_size, -1).to(conf.device)
 
     tot_hidden_info = []
     tot_score = []
@@ -252,22 +232,22 @@ def epi_forward(batch, data_features, network, AAP, conf, \
         # print(i)
         with torch.no_grad():
 
-            prev_hidden_info = AAP.hidden_encoder(dir[idx2], dis[idx2], push_dis[idx2], ctpt[idx2], joint_info[idx2],
-                                                  input_pcs[idx2], start_pos[idx2], end_pos[idx2], f_dir[idx2]).detach().cpu().numpy()
+            prev_hidden_info = AAP.hidden_encoder(input_dirs1[idx2], dis[idx2], push_dis[idx2], ctpt[idx2], joint_info[idx2],
+                                                  input_pcs[idx2], start_pos[idx2], end_pos[idx2], input_dirs2[idx2]).detach().cpu().numpy()
 
-            now_hidden_info = AAP.hidden_encoder(dir[idx1], dis[idx1], push_dis[idx1], ctpt[idx1], joint_info[idx1],
-                                                  input_pcs[idx1], start_pos[idx1], end_pos[idx1], f_dir[idx1]).detach().cpu().numpy()
+            now_hidden_info = AAP.hidden_encoder(input_dirs1[idx1], dis[idx1], push_dis[idx1], ctpt[idx1], joint_info[idx1],
+                                                  input_pcs[idx1], start_pos[idx1], end_pos[idx1], input_dirs2[idx1]).detach().cpu().numpy()
         tot_hidden_info.append(prev_hidden_info)
         # ipdb.set_trace()
         PREV = torch.FloatTensor(np.array(prev_hidden_info)).repeat(batch_size, 1).view(batch_size, -1).to(conf.device)
         NOW = torch.FloatTensor(np.array(now_hidden_info)).repeat(batch_size, 1).view(batch_size, -1).to(conf.device)
         with torch.no_grad():
-            score = AAP.critic.get_ce_loss(dir, input_pcs, ctpt, joint_info, f_dir, gt_labels, PREV,
-                                             start_pos) - AAP.critic.get_ce_loss(dir, input_pcs, ctpt,
-                                                                                       joint_info, f_dir, gt_labels,
+            score = AAP.critic.get_ce_loss(input_dirs1, input_pcs, ctpt, joint_info, input_dirs2, gt_result, PREV,
+                                             start_pos) - AAP.critic.get_ce_loss(input_dirs1, input_pcs, ctpt,
+                                                                                       joint_info, input_dirs2, gt_result,
                                                                                        NOW, start_pos)
             # a_score = AAP.hidden_encoder.get_attention_score(dir[i:i+1], dis[i:i+1], push_dis[i:i+1], ctpt[i:i+1], joint_info[i:i+1], input_pcs[i:i+1], start_pos[i:i+1], end_pos[i:i+1], f_dir[i:i+1])
-            c_score = torch.sigmoid(AAP.critic(dir[i:i+1], input_pcs[i:i+1], ctpt[i:i+1], joint_info[i:i+1], f_dir[i:i+1], PREV[i:i+1],
+            c_score = torch.sigmoid(AAP.critic(input_dirs1[i:i+1], input_pcs[i:i+1], ctpt[i:i+1], joint_info[i:i+1], input_dirs2[i:i+1], PREV[i:i+1],
                                              start_pos[i:i+1]))
         tot_score.append(score.item())
         # tot_a_score.append(a_score[0])
@@ -284,7 +264,7 @@ def epi_forward(batch, data_features, network, AAP, conf, \
     tot_c_score = torch.tensor(tot_c_score).to(device).reshape(-1)
     # tot_score = tot_score * 2 + tot_c_score * 0.5
     tot_c_score = tot_c_score.reshape(-1,1)
-    loss = network.get_loss(input_pcs[tot_action], tot_score, tot_hidden_info, dir[tot_action], f_dir[tot_action], tot_c_score)
+    loss = network.get_loss(input_pcs[tot_action], tot_score, tot_hidden_info, input_dirs1[tot_action], input_dirs2[tot_action], tot_c_score)
 
     data_split = 'train'
     if is_val:
@@ -325,15 +305,18 @@ if __name__ == '__main__':
     parser.add_argument('--exp_suffix', type=str, help='exp suffix')
     parser.add_argument('--model_version', type=str, default='model_AIP', help='model def file')
     parser.add_argument('--primact_type', type=str, default='pushing', help='the primact type')
+    parser.add_argument('--category_types', type=str, help='list all categories', default=None)
     parser.add_argument('--AAP_dir', type=str, help='AAP model directory')
     parser.add_argument('--AAP_epoch', type=str, help='AAP model directory')
-    parser.add_argument('--val_data_list', type=str, help='data directory')
-    parser.add_argument('--train_data_list', type=str, help='data directory')
+    parser.add_argument('--val_data_dir', type=str, help='data directory')
+    parser.add_argument('--train_data_dir', type=str, help='data directory')
     # main parameters (optional)
     parser.add_argument('--device', type=str, default='cuda:0', help='cpu or cuda:x for using cuda on GPU number x')
     parser.add_argument('--seed', type=int, default=-1,
                         help='random seed (for reproducibility) [specify -1 means to generate a random one]')
     parser.add_argument('--log_dir', type=str, default='../logs', help='exp logs directory')
+    parser.add_argument('--num_interaction_data_offline', type=int, default=150)
+    parser.add_argument('--overwrite', action='store_true', default=False)
     # network settings
     parser.add_argument('--num_point_per_shape', type=int, default=10000)
     parser.add_argument('--feat_dim', type=int, default=128)
@@ -370,7 +353,9 @@ if __name__ == '__main__':
     conf.exp_dir = os.path.join(conf.log_dir, conf.exp_name)
     print('exp_dir: ', conf.exp_dir)
     conf.tb_dir = os.path.join(conf.exp_dir, 'tb')
-    if os.path.exists(conf.exp_dir):
+    if conf.overwrite:
+        shutil.rmtree(conf.exp_dir)
+    elif os.path.exists(conf.exp_dir):
         response = input('A training run named "%s" already exists, overwrite? (y/n) ' % conf.exp_name)
         if response != 'y':
             exit(1)
@@ -404,8 +389,48 @@ if __name__ == '__main__':
     conf.device = device
 
     # parse params
+    utils.printout(flog, 'primact_type: %s' % str(conf.primact_type))
 
-    train(conf, conf.train_data_list, conf.val_data_list)
+    if conf.category_types is None:
+        conf.category_types = ['Box', 'Door', 'Faucet', 'Kettle', 'Microwave', 'Refrigerator', 'StorageFurniture',
+                               'Switch', 'TrashCan', 'Window']
+    else:
+        conf.category_types = conf.category_types.split(',')
+    utils.printout(flog, 'category_types: %s' % str(conf.category_types))
+
+    # finding data
+    with open(os.path.join(conf.train_data_dir, 'data_tuple_list.txt'), 'r') as fin:
+        all_train_data_list = [os.path.join(conf.train_data_dir, l.rstrip()) for l in fin.readlines()]
+
+    train_shape_ids = []
+    for item in all_train_data_list:
+        if item.split('_')[-5] not in train_shape_ids:
+            train_shape_ids.append(item.split('_')[-5])
+
+    train_data_list = []
+    for id in train_shape_ids:
+        for item in all_train_data_list:
+            # print(category, item.split('_')[-4])
+            if int(item.split('_')[-1]) < conf.num_interaction_data_offline and item.split('_')[-5] == id:
+                train_data_list.append(item)
+    utils.printout(flog, 'len(train_data_list): %d' % len(train_data_list))
+
+    with open(os.path.join(conf.val_data_dir, 'data_tuple_list.txt'), 'r') as fin:
+        all_val_data_list = [os.path.join(conf.val_data_dir, l.rstrip()) for l in fin.readlines()]
+
+    val_shape_ids = []
+    for item in all_val_data_list:
+        if item.split('_')[-5] not in val_shape_ids:
+            val_shape_ids.append(item.split('_')[-5])
+
+    val_data_list = []
+    for id in val_shape_ids:
+        for item in all_val_data_list:
+            if int(item.split('_')[-1]) < conf.num_interaction_data_offline and item.split('_')[-5] == id:
+                val_data_list.append(item)
+    utils.printout(flog, 'len(val_data_list): %d' % len(val_data_list))
+
+    train(conf, train_data_list, val_data_list)
 
     ### before quit
     # close file log

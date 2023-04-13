@@ -135,6 +135,13 @@ class Env(object):
                         joint_angles.append(float(get_random_number(l, r)))
                     else:
                         joint_angles.append(float(l))
+                elif state in ['0', '1', '2', '3', '4', '5']:
+                    if state == '0':
+                        joint_angles.append(float(l))
+                    else:
+                        ll = l + ((r - l) * (int(state) - 1) / 5)
+                        rr = ll + ((r - l) / 5)
+                        joint_angles.append(float(get_random_number(ll, rr)))
                 else:
                     raise ValueError('ERROR: object init state %s unknown!' % state)
 

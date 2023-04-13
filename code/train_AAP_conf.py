@@ -8,7 +8,7 @@ from argparse import ArgumentParser
 import numpy as np
 import torch
 import torch.utils.data
-from data import SAPIENVisionDataset
+from data_conf import SAPIENVisionDataset
 import utils
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -16,11 +16,13 @@ sys.path.append(os.path.join(BASE_DIR, 'blender_utils'))
 from tensorboardX import SummaryWriter
 from pointnet2_ops.pointnet2_utils import furthest_point_sample
 
+import matplotlib.pyplot as plt
 
-def train(conf, train_data_list, val_data_list, all_train_data_list):
+
+def train(conf, train_data_list, val_data_list):
     # create training and validation datasets and data loaders
-    data_features = ['gripper_direction_world', 'gripper_action_dis', 'gt_motion', 'pcs', 'ctpt', 'joint_info',
-                     'gripper_forward_direction_world', 'gt_labels', 'start_pos', 'end_pos']
+    data_features = ['gripper_direction', 'pcs', 'gripper_forward_direction', 'result', 'start_pos', 'end_pos',
+                     'joint_info', 'category', 'shape_id', 'ctpt', 'pc_movables']
     # load network model
     model_def = utils.get_model_module(conf.model_version)
 
@@ -46,26 +48,30 @@ def train(conf, train_data_list, val_data_list, all_train_data_list):
     # send parameters to device
     network.to(conf.device)
     utils.optimizer_to_device(network_opt, conf.device)
+
     # load dataset
-    train_dataset = SAPIENVisionDataset([conf.primact_type], data_features)
+    train_dataset = SAPIENVisionDataset([conf.primact_type], conf.category_types, data_features, 400000, world_coordinate=True)
 
-    val_dataset = SAPIENVisionDataset([conf.primact_type], data_features)
+    val_dataset = SAPIENVisionDataset([conf.primact_type], conf.category_types, data_features, 400000, world_coordinate=True)
 
-    train_dataset.load_data(train_data_list, batch_size=conf.batch_size, ignore_joint_info=conf.ignore_joint_info)
-    val_dataset.load_data(val_data_list, batch_size=conf.batch_size, ignore_joint_info=conf.ignore_joint_info)
+    train_dataset.load_data(train_data_list)
+    val_dataset.load_data(val_data_list)
     train_dataset.get_seq()
     val_dataset.get_seq()
     utils.printout(conf.flog, str(train_dataset))
+    utils.printout(conf.flog, str(val_dataset))
+
     train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=conf.batch_size, shuffle=False,
                                                    pin_memory=True, \
                                                    num_workers=0, drop_last=True, collate_fn=utils.collate_feats,
                                                    worker_init_fn=utils.worker_init_fn)
-    train_num_batch = len(train_dataloader)
-    utils.printout(conf.flog, str(val_dataset))
+
     val_dataloader = torch.utils.data.DataLoader(val_dataset, batch_size=conf.batch_size, shuffle=False,
                                                  pin_memory=True, \
                                                  num_workers=0, drop_last=True, collate_fn=utils.collate_feats,
                                                  worker_init_fn=utils.worker_init_fn)
+
+    train_num_batch = len(train_dataloader)
     val_num_batch = len(val_dataloader)
     print('train_num_batch: %d, val_num_batch: %d' % (train_num_batch, val_num_batch))
 
@@ -81,8 +87,7 @@ def train(conf, train_data_list, val_data_list, all_train_data_list):
     for epoch in range(start_epoch, conf.epochs):
         ### collect data for the current epoch
         if epoch > start_epoch:
-            utils.printout(conf.flog,
-                           f'  [{strftime("%H:%M:%S", time.gmtime(time.time() - start_time)):>9s} Waiting epoch-{epoch} data ]')
+            utils.printout(conf.flog, f'  [{strftime("%H:%M:%S", time.gmtime(time.time() - start_time)):>9s} Waiting epoch-{epoch} data ]')
 
         ### print log
         if not conf.no_console_log:
@@ -108,7 +113,7 @@ def train(conf, train_data_list, val_data_list, all_train_data_list):
                 last_train_console_log_step = train_step
 
             # save checkpoint
-            if epoch % 5 == 0 and train_batch_ind == 0:
+            if train_batch_ind == 0:
                 with torch.no_grad():
                     utils.printout(conf.flog, 'Saving checkpoint ...... ')
                     torch.save(network.state_dict(), os.path.join(conf.exp_dir, 'ckpts', '%d-network.pth' % (epoch)))
@@ -129,6 +134,7 @@ def train(conf, train_data_list, val_data_list, all_train_data_list):
                                     log_console=log_console, log_tb=not conf.no_tb_log, tb_writer=train_writer,
                                     lr=network_opt.param_groups[0]['lr'])
             total_loss = losses
+            print("batch: ", train_batch_ind, "loss: ", total_loss.item())
             total_loss.backward()
             # optimize one step
             network_opt.step()
@@ -166,51 +172,46 @@ def train(conf, train_data_list, val_data_list, all_train_data_list):
 def critic_forward(batch, data_features, network, conf, \
                    is_val=False, step=None, epoch=None, batch_ind=0, num_batch=1, start_time=0, \
                    log_console=False, log_tb=False, tb_writer=None, lr=None):
+    shape_id = batch[data_features.index('shape_id')]
+    if batch_ind == 0:
+        # categories = batch[data_features.index('category')]
+        print(shape_id)
 
-    dir = batch[data_features.index('gripper_direction_world')]
-    input_pcs = batch[data_features.index('pcs')]
-    ctpt = batch[data_features.index('ctpt')]
-    joint_info = batch[data_features.index('joint_info')]
-    f_dir = batch[data_features.index('gripper_forward_direction_world')]
-    gt_labels = batch[data_features.index('gt_labels')]
-
-    dir = torch.FloatTensor(np.array(dir)).to(conf.device)
-    batch_size = dir.shape[0]
-    dir = dir.view(batch_size, -1)
-
-    ctpt = torch.FloatTensor(np.array(ctpt)).view(batch_size, -1).to(conf.device)
-    joint_info = torch.FloatTensor(np.array(joint_info)).view(batch_size, -1).to(conf.device)
-    f_dir = torch.FloatTensor(np.array(f_dir)).view(batch_size, -1).to(conf.device)
-    gt_labels = torch.FloatTensor(np.array(gt_labels)).view(batch_size).to(conf.device)
-    input_pcs = torch.cat(input_pcs, dim=0).to(conf.device)  # B x 3N x 3   # point cloud
-    # input_pxids = torch.cat(batch[data_features.index('pc_pxids')], dim=0).to(conf.device)  # B x 3N x 2
+    # print(shape_id)
+    # print(trial_id)
+    # prepare input
+    input_pcs = torch.cat(batch[data_features.index('pcs')], dim=0).to(conf.device)  # B x 3N x 3
+    input_movables = torch.cat(batch[data_features.index('pc_movables')], dim=0).to(conf.device)  # B x 3N
     batch_size = input_pcs.shape[0]
 
     input_pcid1 = torch.arange(batch_size).unsqueeze(1).repeat(1, conf.num_point_per_shape).long().reshape(-1)  # BN
-    if conf.sample_type == 'fps':
-        input_pcid2 = furthest_point_sample(input_pcs, conf.num_point_per_shape).long().reshape(-1)  # BN
-    elif conf.sample_type == 'random':
-        pcs_id = ()
-        for batch_idx in range(input_pcs.shape[0]):
-            idx = np.arange(input_pcs[batch_idx].shape[0])
-            np.random.shuffle(idx)
-            while len(idx) < conf.num_point_per_shape:
-                idx = np.concatenate([idx, idx])
-            idx = idx[:conf.num_point_per_shape]
-            pcs_id = pcs_id + (torch.tensor(np.array(idx)),)
-        input_pcid2 = torch.stack(pcs_id, dim=0).long().reshape(-1)
+    input_pcid2 = furthest_point_sample(input_pcs, conf.num_point_per_shape).long().reshape(-1)  # BN
     input_pcs = input_pcs[input_pcid1, input_pcid2, :].reshape(batch_size, conf.num_point_per_shape, -1)
-    ctpt = ctpt.view(batch_size, -1).to(conf.device)
-    input_pcs[:, 0] = ctpt
+    input_movables = input_movables[input_pcid1, input_pcid2].reshape(batch_size, conf.num_point_per_shape)
 
-    dis = batch[data_features.index('gripper_action_dis')]
-    push_dis = batch[data_features.index('gt_motion')]
-    start_pos = batch[data_features.index('start_pos')]
-    end_pos = batch[data_features.index('end_pos')]
-    dis = torch.FloatTensor(np.array(dis)).view(batch_size, -1).to(conf.device)
-    push_dis = torch.FloatTensor(np.array(push_dis)).view(batch_size, -1).to(conf.device)
-    start_pos = torch.FloatTensor(np.array(start_pos)).view(batch_size, -1).to(conf.device)
-    end_pos = torch.FloatTensor(np.array(end_pos)).view(batch_size, -1).to(conf.device)
+    input_dirs1 = torch.cat(batch[data_features.index('gripper_direction')], dim=0).to(conf.device)  # B x 3
+    input_dirs2 = torch.cat(batch[data_features.index('gripper_forward_direction')], dim=0).to(conf.device)  # B x 3
+    joint_info = batch[data_features.index('joint_info')]
+    ctpt = batch[data_features.index('ctpt')]
+
+    # prepare gt
+    gt_result = torch.Tensor(batch[data_features.index('result')]).float().to(conf.device)  # B
+
+    ctpt = torch.FloatTensor(np.array(ctpt)).view(batch_size, -1).to(conf.device)
+    joint_info = torch.FloatTensor(joint_info).view(batch_size, -1).to(conf.device)
+
+    final_dist = 0.1
+    if conf.primact_type == 'pushing-left' or conf.primact_type == 'pushing-up':
+        final_dist = 0.11
+
+    start_pos = np.array(batch[data_features.index('start_pos')])
+    end_pos = np.array(batch[data_features.index('end_pos')])
+    push_dis = abs(start_pos - end_pos)
+
+    dis = torch.Tensor(np.ones((batch_size, 1)) * final_dist).to(conf.device)
+    push_dis = torch.FloatTensor(push_dis).view(batch_size, -1).to(conf.device)
+    start_pos = torch.FloatTensor(start_pos).view(batch_size, -1).to(conf.device)
+    end_pos = torch.FloatTensor(end_pos).view(batch_size, -1).to(conf.device)
 
     if random.random() < conf.right:
         dropout = 'right'
@@ -220,8 +221,22 @@ def critic_forward(batch, data_features, network, conf, \
         dropout = 'random'
     else:
         dropout = 'none'
-    dropout_cnt = random.randint(2,5)
-    loss = network.get_loss_dropout(dir, dis, push_dis, ctpt, joint_info, input_pcs, start_pos, end_pos, f_dir, gt_labels, dropout, dropout_cnt=dropout_cnt)  # B x 2, B x F x N
+    dropout_cnt = random.randint(2, 5)
+    if shape_id[0] in conf.visual_shape:
+        with torch.no_grad():
+            idx = np.random.randint(0, batch_size - 1)
+            critic = network.inference_one_pc(input_dirs1, dis, push_dis, ctpt, joint_info, input_pcs, start_pos, end_pos, input_dirs2, idx)
+            result = critic.cpu().numpy()
+            result *= input_movables[idx].cpu().numpy()
+
+        result_dir = os.path.join('../logs', conf.exp_suffix, f'visu_critic-{shape_id[0]}')
+        if not os.path.exists(result_dir):
+            os.mkdir(result_dir)
+        fn = os.path.join(result_dir, f'pred-{epoch}')
+        utils.render_pts_label_png(fn, input_pcs[idx].cpu().numpy(), result)
+        print(f'saved to {result_dir}')
+
+    loss = network.get_loss_dropout(input_dirs1, dis, push_dis, ctpt, joint_info, input_pcs, start_pos, end_pos, input_dirs2, gt_result, dropout, dropout_cnt=dropout_cnt)  # B x 2, B x F x N
 
     # kl_loss = losses['kl']
     # total_loss = losses['tot']
@@ -267,6 +282,7 @@ if __name__ == '__main__':
     parser.add_argument('--exp_suffix', type=str, help='exp suffix')
     parser.add_argument('--model_version', type=str, default='model_AAP', help='model def file')
     parser.add_argument('--primact_type', type=str, default='pushing', help='the primact type')
+    parser.add_argument('--category_types', type=str, help='list all categories', default=None)
     parser.add_argument('--val_data_dir', type=str, help='data directory')
     parser.add_argument('--train_data_dir', type=str, help='data directory')
     # main parameters (optional)
@@ -274,6 +290,8 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=-1,
                         help='random seed (for reproducibility) [specify -1 means to generate a random one]')
     parser.add_argument('--log_dir', type=str, default='../logs', help='exp logs directory')
+    parser.add_argument('--num_interaction_data_offline', type=int, default=150)
+    parser.add_argument('--overwrite', action='store_true', default=False)
     # network settings
     parser.add_argument('--num_point_per_shape', type=int, default=10000)
     parser.add_argument('--feat_dim', type=int, default=128)
@@ -298,6 +316,8 @@ if __name__ == '__main__':
                         help='number of optimization steps beween console log prints')
     # pc
     parser.add_argument('--sample_type', type=str, default='fps')
+
+    parser.add_argument('--visual_shape', type=str, default=None)
     # parse args
     conf = parser.parse_args()
     conf.ignore_joint_info = True
@@ -310,10 +330,13 @@ if __name__ == '__main__':
     print('exp_dir: ', conf.exp_dir)
     conf.tb_dir = os.path.join(conf.exp_dir, 'tb')
     if os.path.exists(conf.exp_dir):
-        response = input('A training run named "%s" already exists, overwrite? (y/n) ' % conf.exp_name)
-        if response != 'y':
-            exit(1)
-        shutil.rmtree(conf.exp_dir)
+        if conf.overwrite:
+            shutil.rmtree(conf.exp_dir)
+        else:
+            response = input('A training run named "%s" already exists, overwrite? (y/n) ' % conf.exp_name)
+            if response != 'y':
+                exit(1)
+            shutil.rmtree(conf.exp_dir)
 
     os.mkdir(conf.exp_dir)
     os.mkdir(conf.tb_dir)
@@ -342,23 +365,52 @@ if __name__ == '__main__':
     utils.printout(flog, f'Using device: {conf.device}\n')
     conf.device = device
 
+    # parse params
+    utils.printout(flog, 'primact_type: %s' % str(conf.primact_type))
+    if conf.visual_shape is None:
+        conf.visual_shape = []
+    else:
+        conf.visual_shape = conf.visual_shape.split(',')
+
+    if conf.category_types is None:
+        conf.category_types = ['Box', 'Door', 'Faucet', 'Kettle', 'Microwave', 'Refrigerator', 'StorageFurniture', 'Switch', 'TrashCan', 'Window']
+    else:
+        conf.category_types = conf.category_types.split(',')
+    utils.printout(flog, 'category_types: %s' % str(conf.category_types))
+
     # finding data
     with open(os.path.join(conf.train_data_dir, 'data_tuple_list.txt'), 'r') as fin:
         all_train_data_list = [os.path.join(conf.train_data_dir, l.rstrip()) for l in fin.readlines()]
-    if conf.resume:
-        train_data_list = None
-    else:
-        train_data_list = []
-        for item in all_train_data_list:
-            if int(item.split('_')[-1]) < conf.num_interaction_data_offline:
-                train_data_list.append(item)
-        utils.printout(flog, 'len(train_data_list): %d' % len(train_data_list))
 
-    with open(os.path.join(conf.val_data_dir, conf.val_data_fn), 'r') as fin:
-        val_data_list = [os.path.join(conf.val_data_dir, l.rstrip()) for l in fin.readlines()]
+    train_shape_ids = []
+    for item in all_train_data_list:
+        if item.split('_')[-5] not in train_shape_ids:
+            train_shape_ids.append(item.split('_')[-5])
+
+    train_data_list = []
+    for id in train_shape_ids:
+        for item in all_train_data_list:
+            # print(category, item.split('_')[-4])
+            if int(item.split('_')[-1]) < conf.num_interaction_data_offline and item.split('_')[-5] == id:
+                train_data_list.append(item)
+    utils.printout(flog, 'len(train_data_list): %d' % len(train_data_list))
+
+    with open(os.path.join(conf.val_data_dir, 'data_tuple_list.txt'), 'r') as fin:
+        all_val_data_list = [os.path.join(conf.val_data_dir, l.rstrip()) for l in fin.readlines()]
+
+    val_shape_ids = []
+    for item in all_val_data_list:
+        if item.split('_')[-5] not in val_shape_ids:
+            val_shape_ids.append(item.split('_')[-5])
+
+    val_data_list = []
+    for id in val_shape_ids:
+        for item in all_val_data_list:
+            if int(item.split('_')[-1]) < conf.num_interaction_data_offline and item.split('_')[-5] == id:
+                val_data_list.append(item)
     utils.printout(flog, 'len(val_data_list): %d' % len(val_data_list))
 
-    train(conf, train_data_list, val_data_list, all_train_data_list)
+    train(conf, train_data_list, val_data_list)
 
     ### before quit
     # close file log
