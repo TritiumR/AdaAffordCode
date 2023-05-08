@@ -20,7 +20,7 @@ class SAPIENVisionDataset(data.Dataset):
 
     def __init__(self, primact_types, category_types, data_features, buffer_max_num, \
             abs_thres=0.01, rel_thres=0.5, dp_thres=0.5, img_size=224, \
-            only_true_data=False, world_coordinate=False):
+            only_true_data=False, world_coordinate=False, batch_zise=32):
         self.primact_types = primact_types
         self.category_types = category_types
 
@@ -31,6 +31,7 @@ class SAPIENVisionDataset(data.Dataset):
         self.dp_thres = dp_thres
         self.only_true_data = only_true_data
         self.world_coordinate = world_coordinate
+        self.batch_size = batch_zise
 
         # data buffer
         self.data_buffer = []  # (gripper_direction_world, gripper_action_dis, gt_motion)
@@ -71,6 +72,9 @@ class SAPIENVisionDataset(data.Dataset):
                 ori_pixel_ids = np.array(result_data['pixel_locs'], dtype=np.int32)
                 pixel_ids = np.round(np.array(result_data['pixel_locs'], dtype=np.float32) / 448 * self.img_size).astype(np.int32)
                 ctpt = result_data['position_world']
+                target_object_part_actor_id = ['target_object_part_actor_id']
+                ctpt_2d = result_data['pixel_locs']
+                joint_angles = result_data['joint_angles']
 
                 success = self.check_success(result_data, cur_primact_type)
 
@@ -82,12 +86,12 @@ class SAPIENVisionDataset(data.Dataset):
 
                 # load original data
                 if success:
-                    cur_data = (cur_dir, cur_shape_id, state, cur_category, cur_cnt_id, cur_trial_id, ctpt, camera_direction, camera_mat44,
-                            ori_pixel_ids, pixel_ids, gripper_direction, gripper_forward_direction, start_pos, end_pos, True, True)
+                    cur_data = (cur_dir, cur_shape_id, state, cur_category, cur_cnt_id, cur_trial_id, ctpt, ctpt_2d, camera_direction, camera_mat44,
+                            ori_pixel_ids, pixel_ids, gripper_direction, gripper_forward_direction, start_pos, end_pos, target_object_part_actor_id, joint_angles, True, True)
                 else:
                     if not self.only_true_data:
-                        cur_data = (cur_dir, cur_shape_id, state, cur_category, cur_cnt_id, cur_trial_id, ctpt, camera_direction, camera_mat44,
-                                ori_pixel_ids, pixel_ids, gripper_direction, gripper_forward_direction, start_pos, end_pos, True, False)
+                        cur_data = (cur_dir, cur_shape_id, state, cur_category, cur_cnt_id, cur_trial_id, ctpt, ctpt_2d, camera_direction, camera_mat44,
+                                ori_pixel_ids, pixel_ids, gripper_direction, gripper_forward_direction, start_pos, end_pos, target_object_part_actor_id, joint_angles, True, False)
 
                 self.data_buffer.append(cur_data)
 
@@ -134,7 +138,7 @@ class SAPIENVisionDataset(data.Dataset):
         return success
 
     def get_seq(self):
-        length = len(self.data_buffer) // 32
+        length = len(self.data_buffer) // self.batch_size
         self.seq = np.arange(length)
         np.random.shuffle(self.seq)
         
@@ -149,10 +153,10 @@ class SAPIENVisionDataset(data.Dataset):
         return len(self.data_buffer)
 
     def __getitem__(self, index):
-        ind = index // 32
-        index = self.seq[ind] * 32 + (index % 32)
-        cur_dir, shape_id, state, category, cnt_id, trial_id, ctpt, camera_direction, camera_mat44, ori_pixel_ids, pixel_ids, \
-            gripper_direction, gripper_forward_direction, start_pos, end_pos, is_original, result = self.data_buffer[index]
+        ind = index // self.batch_size
+        index = self.seq[ind] * self.batch_size + (index % self.batch_size)
+        cur_dir, shape_id, state, category, cnt_id, trial_id, ctpt, ctpt_2d, camera_direction, camera_mat44, ori_pixel_ids, pixel_ids, \
+            gripper_direction, gripper_forward_direction, start_pos, end_pos, target_object_part_actor_id, joint_angles, is_original, result = self.data_buffer[index]
 
         # grids
         grid_x, grid_y = np.meshgrid(np.arange(448), np.arange(448))
@@ -283,6 +287,15 @@ class SAPIENVisionDataset(data.Dataset):
 
             elif feat == 'ctpt':
                 data_feats = data_feats + (ctpt,)
+
+            elif feat == 'target_object_part_actor_id':
+                data_feats = data_feats + (target_object_part_actor_id,)
+
+            elif feat == 'ctpt_2d':
+                data_feats = data_feats + (ctpt_2d,)
+
+            elif feat == 'joint_angles':
+                data_feats = data_feats + (joint_angles,)
 
             else:
                 raise ValueError('ERROR: unknown feat type %s!' % feat)

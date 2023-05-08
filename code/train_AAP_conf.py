@@ -173,7 +173,7 @@ def critic_forward(batch, data_features, network, conf, \
                    is_val=False, step=None, epoch=None, batch_ind=0, num_batch=1, start_time=0, \
                    log_console=False, log_tb=False, tb_writer=None, lr=None):
     shape_id = batch[data_features.index('shape_id')]
-    if batch_ind == 0:
+    if batch_ind == 0 and not is_val:
         # categories = batch[data_features.index('category')]
         print(shape_id)
 
