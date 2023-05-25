@@ -59,11 +59,11 @@ def get_hidden_info(input_pcs_list, dir_list, f_dir_list, push_dis_list, dis_lis
 
 
 def critic_forward(batch, data_features, network, conf, hidden_info):
-    dir = batch[data_features.index('gripper_direction')]
+    dir = [x.numpy() for x in batch[data_features.index('gripper_direction')]]
     input_pcs = batch[data_features.index('pcs')]
     ctpt = batch[data_features.index('ctpt')]
     joint_info = batch[data_features.index('joint_info')]
-    f_dir = batch[data_features.index('gripper_forward_direction')]
+    f_dir = [x.numpy() for x in batch[data_features.index('gripper_forward_direction')]]
     gt_labels = batch[data_features.index('result')]
 
     dir = torch.FloatTensor(np.array(dir)).to(conf.device)
@@ -286,9 +286,7 @@ def run_an_collect(idx_process, args, transition_Q, epoch_Q):
     out_dir = os.path.join(args.out_dir, args.exp_name)
     # setup env
     flog = open(os.path.join(out_dir, 'log_%d.txt' % idx_process), 'a')
-    print('111')
     env = Env(flog=flog, show_gui=(not args.no_gui))
-    print('222')
     # cam = Camera(env, theta=3.159759861190408, phi=0.7826405702413783)
     cam = Camera(env, fixed_position=True)
     if not args.no_gui:
@@ -331,7 +329,6 @@ def run_an_collect(idx_process, args, transition_Q, epoch_Q):
                                                    worker_init_fn=utils.worker_init_fn)
 
     AIP_old = model_AIP.AIP(feat_dim=args.feat_dim, hidden_dim=args.hidden_dim).to(device).eval()
-    print('333')
 
     if args.primact_type == "pulling":
         train_conf = torch.load(
@@ -389,12 +386,15 @@ def run_an_collect(idx_process, args, transition_Q, epoch_Q):
             if (random.random() < 0.5):
                 continue
             now_epoch_qsize = epoch_Q.qsize()
+            print('size: ', now_epoch_qsize)
             #################################### load network ###############################
+            if now_epoch_qsize > args.epoch:
+                exit(0)
             if now_epoch_qsize > prev_epoch_qsize:
                 AIP_old.load_state_dict(
-                    torch.load(os.path.join(out_dir, 'ckpts', '%d_secondAIP-network.pth' % (now_epoch_qsize))))
+                    torch.load(os.path.join(out_dir, 'ckpts', '%d_secondAIP-network.pth' % (now_epoch_qsize - 1))))
                 AAP_old.load_state_dict(
-                    torch.load(os.path.join(out_dir, 'ckpts', '%d_secondAAP-network.pth' % (now_epoch_qsize))))
+                    torch.load(os.path.join(out_dir, 'ckpts', '%d_secondAAP-network.pth' % (now_epoch_qsize - 1))))
                 prev_epoch_qsize = now_epoch_qsize
             ##################################################################################
 
@@ -409,7 +409,7 @@ def run_an_collect(idx_process, args, transition_Q, epoch_Q):
             start_pos_list = []
             end_pos_list = []
             ##########################################################################################
-            idxx = [random.randint(0, 30)]
+            idxx = [random.randint(0, args.batch_size - 1)]
             idx = idxx[0]
             shape_id = batch[data_features.index('shape_id')][idx]
             print(shape_id)
@@ -475,8 +475,9 @@ def run_an_collect(idx_process, args, transition_Q, epoch_Q):
                                                  device=args.device)
             #############################################################################
             input_pcs_list.append(world_pc)
-            dir_list.append(batch[data_features.index('gripper_direction')][idx])
-            f_dir_list.append(batch[data_features.index('gripper_forward_direction')][idx])
+            # print('direction: ', batch[data_features.index('gripper_direction')][idx][0].shape)
+            dir_list.append(batch[data_features.index('gripper_direction')][idx].numpy()[0])
+            f_dir_list.append(batch[data_features.index('gripper_forward_direction')][idx].numpy()[0])
             ctpt_list.append(batch[data_features.index('ctpt')][idx])
             final_dist = 0.1
             if args.primact_type == 'pushing-left' or args.primact_type == 'pushing-up':
@@ -560,7 +561,7 @@ def run_an_collect(idx_process, args, transition_Q, epoch_Q):
                 visualize_result *= init_mask
                 visualize_result = visualize_result * 1.0 / visualize_result.max()
 
-                if shape_id[0] in args.visual_shape or train_batch_ind % 3 == 0:
+                if shape_id[0] in args.visual_shape:
                     cam_pc = (np.linalg.inv(mat44[:3, :3]) @ init_pc_world[0].cpu().numpy().T).T
                     result_dir = os.path.join('../logs', args.exp_name, f'visu_critic-{shape_id}')
                     if not os.path.exists(result_dir):
@@ -680,7 +681,6 @@ def run_an_collect(idx_process, args, transition_Q, epoch_Q):
                 final_rotmat[:3, 3] = position_world - action_direction_world * final_dist - action_direction_world * 0.1
                 if args.primact_type == 'pushing':
                     final_rotmat[:3, 3] = position_world + action_direction_world * final_dist - action_direction_world * 0.15
-                final_pose = Pose().from_transformation_matrix(final_rotmat)
 
                 start_rotmat = np.array(rotmat, dtype=np.float32)
                 start_rotmat[:3, 3] = position_world - action_direction_world * 0.15
@@ -809,6 +809,8 @@ if __name__ == '__main__':
     parser.add_argument('--device', type=str, default='cuda:0', help='cpu or cuda:x for using cuda on GPU number x')
     parser.add_argument('--num_point_per_shape', type=int, default=10000)
     parser.add_argument('--num_interaction_data_offline', type=int, default=100)
+    parser.add_argument('--save_interval', type=int, default=100)
+    parser.add_argument('--epoch', type=int, default=20)
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--hidden_dim', type=int, default=128)
     parser.add_argument('--feat_dim', type=int, default=128)
@@ -934,12 +936,15 @@ if __name__ == '__main__':
                 print("epoch: ", epoch, "loss: ", loss_cnt / 10)
                 loss_cnt = 0
 
-            if epoch % 100 == 0:
-                step = epoch // 100
+            if epoch % args.save_interval == 0:
+                step = epoch // args.save_interval
                 with torch.no_grad():
                     torch.save(AAP.state_dict(), os.path.join(out_dir, 'ckpts', f'{step}_secondAAP-network.pth'))
                     torch.save(AIP.state_dict(), os.path.join(out_dir, 'ckpts', f'{step}_secondAIP-network.pth'))
                 epoch_q.put(step)
+
+                if step >= args.epoch:
+                    exit(0)
 
             epoch += 1
 
